@@ -35,9 +35,10 @@
 #include <sys/fcntl.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <linux/kernel.h>
 #include "jsmn.h"
 #include "json.h"
-#include <linux/kernel.h>
+#include "jevents-internal.h"
 
 static char *mapfile(const char *fn, size_t *size)
 {
@@ -81,17 +82,22 @@ jsmntok_t *parse_json(const char *fn, char **map, size_t *size, int *len)
 	unsigned sz;
 
 	*map = mapfile(fn, size);
-	if (!*map)
+	if (!*map) {
+	    set_last_error("Failed to open event file %s", fn);
 		return NULL;
+	}
 	/* Heuristic */
 	sz = *size * 16;
 	tokens = malloc(sz);
-	if (!tokens)
+	if (!tokens) {
+	    set_last_error("malloc failed");
 		goto error;
+	}
 	jsmn_init(&parser);
 	res = jsmn_parse(&parser, *map, *size, tokens,
 			 sz / sizeof(jsmntok_t));
 	if (res != JSMN_SUCCESS) {
+	    set_last_error("Failed while parsing event file %s, error: %d", fn, res);
 		fprintf(stderr, "%s: json error %d\n", fn, res);
 		goto error_free;
 	}

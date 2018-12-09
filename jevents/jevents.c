@@ -36,9 +36,11 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <stdarg.h>
 #include "jsmn.h"
 #include "json.h"
 #include "jevents.h"
+#include "jevents-internal.h"
 
 static const char *json_default_name(char *type)
 {
@@ -64,13 +66,20 @@ static const char *json_default_name(char *type)
 		if (!home || asprintf(&cache, "%s/.cache", home) < 0)
 			goto out;
 	}
+
+	if (access(cache, R_OK) == -1) {
+	    set_last_error("Unable to open user .cache directory at %s", cache);
+	    goto out;
+	}
+
 	if (cache && idstr)
 		asprintf(&res, "%s/pmu-events/%s.json",
 			     cache,
 			     idstr);
+
+out:
 	if (home)
 		free(cache);
-out:
 	free(idstr);
 	return res;
 }
@@ -240,12 +249,20 @@ int json_events(const char *fn,
 	size_t size;
 	jsmntok_t *tokens, *tok;
 	int i, j, len;
-	char *map;
+	char *map = NULL;
 	char buf[128];
 	const char *orig_fn = fn;
 
-	if (!fn)
+	if (!fn) {
 		fn = json_default_name("-core");
+		if (!fn)
+		    return JEV_NO_PMU_EVENTS_FILE;
+		if (access(fn, R_OK) == -1) {
+		    set_last_error("Unable to open CPU events file at %s - unsupported CPU or need to download new events", fn);
+		    return JEV_NO_PMU_EVENTS_FILE;
+		}
+	}
+
 	tokens = parse_json(fn, &map, &size, &len);
 	if (!tokens)
 		return -EIO;
@@ -358,7 +375,8 @@ int json_events(const char *fn,
 	EXPECT(tok - tokens == len, tok, "unexpected objects at end");
 	err = 0;
 out_free:
-	free_json(map, size, tokens);
+    if (map)
+        free_json(map, size, tokens);
 	if (!orig_fn && !err) {
 		fn = json_default_name("-uncore");
 		err = json_events(fn, func, data);
@@ -370,3 +388,38 @@ out_free:
 		free((char *)fn);
 	return err;
 }
+
+const char* jevent_error_to_string(int error_code) {
+    switch (error_code) {
+    case 0: return "Success";
+    case JEV_GENERIC_ERROR: return "Unspecified error";
+    case JEV_NO_PMU_EVENTS_FILE: return "Cannot find the appropriate CPU-specific event file";
+    }
+    return "Unknown error";
+}
+
+// TODO: make this threadsafe
+const char *last_error;
+bool last_error_freeable;
+
+void set_last_error(const char *format, ...) {
+    if (last_error_freeable)
+        free((char *)last_error);
+    va_list fmt_args;
+    va_start(fmt_args, format);
+    char *le;
+    if (vasprintf(&le, format, fmt_args) < 0) {
+        last_error = (char *)format;  // reasonable backup if vasprintf failed for some reason
+        last_error_freeable = false;
+    } else {
+        last_error = le;
+        last_error_freeable = true;
+    }
+    va_end(fmt_args);
+}
+
+const char *jevent_get_error_details() {
+    return last_error ? last_error : "No details available.";
+}
+
+
