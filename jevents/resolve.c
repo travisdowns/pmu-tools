@@ -75,7 +75,7 @@ static int read_file(char **val, const char *fmt, ...)
 	return ret;
 }
 
-#define BITS(x) ((x) == 64 ? -1UL : (1UL << (x)) - 1)
+#define BITS(x) ((x) == 64 ? -1ULL : (1ULL << (x)) - 1)
 
 static bool try_parse(char *format, char *fmt, __u64 val, __u64 *config)
 {
@@ -89,7 +89,8 @@ static bool try_parse(char *format, char *fmt, __u64 val, __u64 *config)
 	return true;
 }
 
-static int read_qual(const char *qual, struct perf_event_attr *attr)
+static int read_qual(const char *qual, struct perf_event_attr *attr,
+		const char *str)
 {
 	while (*qual) {
 		switch (*qual) { 
@@ -107,7 +108,7 @@ static int read_qual(const char *qual, struct perf_event_attr *attr)
 			break;
 		/* XXX more */
 		default:
-			fprintf(stderr, "Unknown modifier %c at end\n", *qual);
+			fprintf(stderr, "Unknown modifier %c at end for %s\n", *qual, str);
 			return -1;
 		}
 		qual++;
@@ -126,6 +127,18 @@ static bool special_attr(char *name, int val, struct perf_event_attr *attr)
 		attr->freq = 1;
 		return true;
 	}
+	if (!strcmp(name, "config")) {
+		attr->config = val;
+		return true;
+	}
+	if (!strcmp(name, "config1")) {
+		attr->config2 = val;
+		return true;
+	}
+	if (!strcmp(name, "config2")) {
+		attr->config2 = val;
+		return true;
+	}
 	return false;
 }
 
@@ -140,9 +153,10 @@ static int parse_terms(char *pmu, char *config, struct perf_event_attr *attr, in
 
 	while ((term = strsep(&config, ",")) != NULL) {
 		char name[30];
-		int n, val = 1;
+		int n;
+		unsigned long long val = 1;
 
-		n = sscanf(term, "%30[^=]=%i", name, &val);
+		n = sscanf(term, "%30[^=]=%lli", name, &val);
 		if (n < 1)
 			break;
 		if (special_attr(name, val, attr))
@@ -155,13 +169,14 @@ static int parse_terms(char *pmu, char *config, struct perf_event_attr *attr, in
 			    read_file(&alias, "/sys/devices/%s/events/%s", pmu, name) == 0) {
 				if (parse_terms(pmu, alias, attr, 1) < 0) {
 					free(alias);
-					fprintf(stderr, "Cannot parse kernel event alias %s\n", name);
+					fprintf(stderr, "Cannot parse kernel event alias %s for %s\n", name,
+							term);
 					break;
 				}
 				free(alias);
 				continue;
 			}
-			fprintf(stderr, "Cannot parse qualifier %s\n", name);
+			fprintf(stderr, "Cannot parse qualifier %s for %s\n", name, term);
 			break;
 		}
 		bool ok = try_parse(format, "config:%d-%d", val, &attr->config) ||
@@ -171,8 +186,8 @@ static int parse_terms(char *pmu, char *config, struct perf_event_attr *attr, in
 		bool ok2 = try_parse(format, "config2:%d-%d", val, &attr->config2) ||
 			try_parse(format, "config2:%d", val, &attr->config2);
 		if (!ok && !ok2) {
-			fprintf(stderr, "Cannot parse kernel format %s: %s\n",
-					name, format);
+			fprintf(stderr, "Cannot parse kernel format %s: %s for %s\n",
+					name, format, term);
 			break;
 		}
 		if (ok2)
@@ -195,11 +210,34 @@ static int try_pmu_type(char **type, char *fmt, char *pmu)
 }
 
 /**
+ * jevent_pmu_uncore - Is perf event string for an uncore PMU.
+ * @pmu: perf pmu
+ * Return true if yes, false if not or unparseable.
+ */
+bool jevent_pmu_uncore(const char *str)
+{
+	char *cpumask;
+	int cpus;
+	char pmu[30];
+
+	if (!strchr(str, '/'))
+		return false;
+	if (sscanf(str, "%30[^/]", pmu) < 1)
+		return false;
+	int ret = read_file(&cpumask, "/sys/devices/%s/cpumask", pmu);
+	if (ret < 0)
+		return false;
+	bool isuncore = sscanf(cpumask, "%d", &cpus) == 1 && cpus == 0;
+	free(cpumask);
+	return isuncore;
+}
+
+/**
  * jevent_name_to_attr - Resolve perf style event to perf_attr
  * @str: perf style event (e.g. cpu/event=1/)
  * @attr: perf_attr to fill in.
  *
- * Resolve perf new style event descriptor to perf ATTR. User must initiali
+ * Resolve perf new style event descriptor to perf ATTR. User must initialize
  * attr->sample_type and attr->read_format as needed after this call,
  * and possibly other fields. Returns 0 when succeeded.
  */
@@ -213,10 +251,10 @@ int jevent_name_to_attr(const char *str, struct perf_event_attr *attr)
 	attr->type = PERF_TYPE_RAW;
 
 	if (sscanf(str, "r%llx%n", &attr->config, &qual_off) == 1) {
-	    assert(qual_off != -1);
+		assert(qual_off != -1);
 		if (str[qual_off] == 0)
 			return 0;
-		if (str[qual_off] == ':' && read_qual(str + qual_off, attr) == 0)
+		if (str[qual_off] == ':' && read_qual(str + qual_off, attr, str) == 0)
 			return 0;
 		return -1;
 	}
@@ -233,7 +271,7 @@ int jevent_name_to_attr(const char *str, struct perf_event_attr *attr)
 	free(type);
 	if (parse_terms(pmu, config, attr, 0) < 0)
 		return -1;
-	if (qual_off != -1 && read_qual(str + qual_off, attr) < 0)
+	if (qual_off != -1 && read_qual(str + qual_off, attr, str) < 0)
 		return -1;
 	return 0;
 }

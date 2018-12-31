@@ -12,7 +12,7 @@ trap failed ERR 0
 PATH=.:./examples:$PATH
 
 
-listevents > l
+$V listevents > l
 [ $(wc -l < l) -gt 50 ] 
 grep -q offcore_response l
 
@@ -24,15 +24,26 @@ else
 	E=instructions
 fi
 
-jestat true
-jestat -e cpu-cycles,cpu_clk_unhalted.ref_tsc,$E true
-jestat -a sleep 1
+$V jestat true
+$V jestat -e cpu-cycles,cpu_clk_unhalted.ref_tsc,$E true
+$V jestat -e "{cpu-cycles,cpu_clk_unhalted.ref_tsc},{$E,cache-references}" -a sleep 1
+$V jestat -a sleep 1
 
-showevent $E
+# test all events
+LEN=$(wc -l l | awk ' { print $1 }')
+INC=20
+for ((i = 1; i <= LEN; i += INC)) ; do
+	# skip i915/vcs-* which often returns ENODEV for no good reason
+	$V jestat $(nl l |
+		    egrep -v 'i915/vcs' |
+		    awk -v v=$i -v inc=$INC '$1 >= v && $1 <= v+inc { print "-e " $2 } ') -a true
+done
 
-event-rmap $E
+$V showevent $E
 
-examples/addr
+$V event-rmap $E
+
+$V examples/addr
 examples/rtest
 examples/rtest2
 
